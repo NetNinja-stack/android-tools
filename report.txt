@@ -1,0 +1,6 @@
+~/android-tools $ python3 tiktok_comments_termux.py
+✅ Cookies: loaded from cookies.txt (34 entries)
+✅ UA loaded from ua.txt
+
+🔗 Processing: https://vm.tiktok.com/ZNdV8LMnm/
+⚠️ Could not extract aweme_id from link. Skipping.
