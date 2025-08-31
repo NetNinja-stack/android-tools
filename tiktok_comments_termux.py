@@ -1,37 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-TikTok comments downloader for Termux (Android) without Selenium.
-
-How it works:
-- You manually export cookies + User-Agent from your browser session on tiktok.com
-- Put them into files near this script: cookies.json OR cookies.txt and ua.txt
-- The script reads links from links.txt (one TikTok video URL per line)
-- It saves all found comments (and replies) into database.txt
-
-Files the script uses (any of the cookie formats is fine):
-  - links.txt            — required. One TikTok URL per line
-  - cookies.json         — optional. Either [{"name":"...","value":"..."}, ...] or {"name":"value", ...}
-  - cookies.txt          — optional. Raw header like: "name=value; name2=value2; ..."
-  - curl.txt             — optional. Paste full "Copy as cURL" (from DevTools) here; script will extract Cookie + UA
-  - ua.txt               — optional. User-Agent string
-
-Minimal Termux setup:
-  pkg update && pkg upgrade -y
-  pkg install python -y
-  pip install --upgrade pip
-  pip install requests
-  termux-setup-storage
-  mkdir -p ~/storage/shared/tiktok_scraper && cd ~/storage/shared/tiktok_scraper
-  # put this script + links.txt + cookies/ua files here, then run:
-  python tiktok_comments_termux.py
-
-Notes:
-- Keep cookies fresh. If you start getting 0 comments or 403, refresh cookies from your browser.
-- Use the SAME User-Agent as when you exported cookies.
-- Respect TikTok ToS and laws in your country; use for personal/educational purposes.
-"""
-
 import json
 import os
 import re
@@ -47,6 +13,7 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 50))  # TikTok web limits 50
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 20))
 SLEEP_BETWEEN_PAGES = float(os.environ.get("SLEEP_BETWEEN_PAGES", 0.6))
 OUTPUT_FILE = os.environ.get("OUTPUT_FILE", "database.txt")
+PAUSE_AFTER_LINK = 300  # 5 минут = 300 секунд
 
 # === Helpers to load cookies & UA ===
 
@@ -91,7 +58,6 @@ def _extract_from_curl_txt(path: str) -> Tuple[Optional[Dict[str, str]], Optiona
     except Exception:
         return None, None
 
-    # Try to find -H 'Cookie: ...' or --header "Cookie: ..."
     cookie_match = re.search(r"(?i)\b(?:-H|--header)\s+['\"]Cookie:\s*([^'\"]+)['\"]", blob)
     ua_match = re.search(r"(?i)\b(?:-H|--header)\s+['\"]User-Agent:\s*([^'\"]+)['\"]", blob)
 
@@ -101,7 +67,6 @@ def _extract_from_curl_txt(path: str) -> Tuple[Optional[Dict[str, str]], Optiona
 
 
 def load_cookies_and_ua() -> Tuple[Dict[str, str], str]:
-    # Order of attempts for cookies
     candidates_json = ["cookies.json", os.path.join(".secret", "cookies.json")]
     for p in candidates_json:
         jar = _load_cookies_from_json(p)
@@ -111,7 +76,6 @@ def load_cookies_and_ua() -> Tuple[Dict[str, str], str]:
     else:
         jar = None
 
-    # Try cookies.txt (raw header)
     if jar is None:
         for p in ["cookies.txt", os.path.join(".secret", "cookies.txt")]:
             if os.path.exists(p):
@@ -126,7 +90,6 @@ def load_cookies_and_ua() -> Tuple[Dict[str, str], str]:
                 except Exception:
                     pass
 
-    # Try curl.txt
     ua_from_curl = None
     if jar is None or not jar:
         for p in ["curl.txt", os.path.join(".secret", "curl.txt")]:
@@ -137,11 +100,8 @@ def load_cookies_and_ua() -> Tuple[Dict[str, str], str]:
                 break
 
     if not jar:
-        raise RuntimeError(
-            "Cookies not found. Provide cookies.json OR cookies.txt OR curl.txt next to the script."
-        )
+        raise RuntimeError("Cookies not found. Provide cookies.json OR cookies.txt OR curl.txt next to the script.")
 
-    # Load UA
     ua = None
     for p in ["ua.txt", os.path.join(".secret", "ua.txt")]:
         if os.path.exists(p):
@@ -158,7 +118,6 @@ def load_cookies_and_ua() -> Tuple[Dict[str, str], str]:
         print("✅ UA extracted from curl.txt")
 
     if ua is None:
-        # Fallback UA: Chrome on Android
         ua = (
             "Mozilla/5.0 (Linux; Android 13; Pixel 5) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -172,11 +131,9 @@ def load_cookies_and_ua() -> Tuple[Dict[str, str], str]:
 # === TikTok helpers ===
 
 def extract_aweme_id(url: str) -> Optional[str]:
-    # Typical forms: https://www.tiktok.com/@user/video/7222222222222222222
     m = re.search(r"/video/(\d+)", url)
     if m:
         return m.group(1)
-    # Fallback: last numeric segment
     tail = url.split("?")[0].rstrip("/").split("/")[-1]
     return tail if tail.isdigit() else None
 
@@ -191,7 +148,6 @@ def build_session(ua: str, cookies: Dict[str, str]) -> requests.Session:
             "Origin": "https://www.tiktok.com",
         }
     )
-    # Install cookies into the session
     for name, value in cookies.items():
         s.cookies.set(name, value, domain=".tiktok.com")
     return s
@@ -295,7 +251,6 @@ def fetch_comments(session: requests.Session, aweme_id: str, referer: str) -> li
             }
             all_comments.append(comment_obj)
 
-            # Fetch all replies if there are more than inline provided
             inline_replies = c.get("reply_comment") or []
             inline_count = len(inline_replies)
             total_replies = comment_obj["reply_count"] or 0
@@ -330,7 +285,7 @@ def save_to_database(link: str, comments: list, out_path: str = OUTPUT_FILE) -> 
         text = text.replace("\n", " ")
         lines.append(f"— (@{nickname}): {text}")
 
-    lines.append("")  # blank line between entries
+    lines.append("")  # blank line
 
     with open(out_path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -359,8 +314,8 @@ def main():
         print("❌", e)
         return
 
-    for link in links:
-        print(f"\n🔗 Processing: {link}")
+    for idx, link in enumerate(links, 1):
+        print(f"\n🔗 Processing {idx}/{len(links)}: {link}")
         aweme_id = extract_aweme_id(link)
         if not aweme_id:
             print("⚠️ Could not extract aweme_id from link. Skipping.")
@@ -374,7 +329,11 @@ def main():
             print(f"⚠️ Network error for {link}: {e}")
         except Exception as e:
             print(f"⚠️ Error while processing {link}: {e}")
-        time.sleep(0.8)
+
+        # Пауза после каждой ссылки
+        if idx < len(links):
+            print(f"⏸ Пауза 5 минут перед следующей ссылкой...")
+            time.sleep(PAUSE_AFTER_LINK)
 
 
 if __name__ == "__main__":
